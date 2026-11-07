@@ -1,0 +1,21 @@
+{
+  "name": "tiktok-live-feed",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nguồn cấp sự kiện TikTok LIVE độ trễ thấp cho game local (connector ký qua EulerStream, sự kiện chảy thẳng từ TikTok WebSocket)",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "selftest": "node test/selftest.js",
+    "connect-test": "node tools/connect-test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "tiktok-live-connector": "^2.5.0",
+    "ws": "^8.18.0"
+  }
+}

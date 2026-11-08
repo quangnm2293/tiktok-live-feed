@@ -17,7 +17,7 @@ const STATE_HINTS = {
     'SIGN_MODE=euler nhưng chưa có EULER_API_KEY trong file .env. Hoặc bỏ SIGN_MODE để dùng máy ký tự host (mặc định, không cần key).',
   waiting_username:
     'Chưa có TIKTOK_USERNAME trong file .env — điền username TikTok của phòng live (không có dấu @).',
-  waiting_room: 'Chủ phòng chưa live. Dịch vụ sẽ tự thử kết nối lại mỗi 15 giây.',
+  waiting_room: 'Chủ phòng chưa live. Dịch vụ sẽ tự thử kết nối lại mỗi 10 giây.',
   sign_blocked:
     'Máy ký local bị TikTok từ chối ở bước im/fetch. Kiểm tra cửa sổ Chrome ký: mở trang live trong cửa sổ đó và ĐĂNG NHẬP TikTok (1 lần duy nhất — phiên khách thường bị TikTok cấp thiếu dữ liệu ở phòng nhỏ). Dịch vụ tự thử lại mỗi 60 giây.',
 };
@@ -108,6 +108,10 @@ class FeedServer {
       eventsReceived: { ...this.counts },
       latency: this._latencyStats(),
       lastError: this.feed.lastError || null,
+      // Chẩn đoán ngắt quãng (live 08/11): số lần mất kết nối + sự kiện cuối cách đây bao lâu.
+      disconnects: this.feed.disconnectCount || 0,
+      lastDisconnectAt: this.feed.lastDisconnectAt || null,
+      lastEventAgoSec: this.feed._lastEventAt ? Math.round((Date.now() - this.feed._lastEventAt) / 1000) : null,
     };
   }
 

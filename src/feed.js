@@ -25,7 +25,7 @@ const { normalizeEvent } = require('./normalize');
 //   connecting       -> đang connect()
 //   connected        -> đang nhận sự kiện
 //   reconnecting     -> rớt kết nối, đang backoff để nối lại
-//   waiting_room     -> chủ phòng chưa live (UserOfflineError), thử lại 15s
+//   waiting_room     -> chủ phòng chưa live (UserOfflineError), thử lại 10s
 //   sign_blocked     -> máy ký local bị TikTok từ chối ở im/fetch
 //                       (LocalSignBlocked), thử lại thưa (60s)
 //   error            -> lỗi khác, vẫn tiếp tục backoff (không crash)
@@ -33,8 +33,8 @@ const { normalizeEvent } = require('./normalize');
 //
 // Process KHÔNG BAO GIỜ thoát vì lỗi connector: mọi lỗi đều bị bắt tại đây.
 
-const BACKOFF_STEPS = [1000, 2000, 5000, 10000, 30000];
-const OFFLINE_RETRY_MS = 15000;
+const BACKOFF_STEPS = [1000, 2000, 3000, 5000, 10000]; // trần 10s (live 08/11: rớt kết nối mà chờ tới 30s mới nối lại thì mất cả đoạn comment)
+const OFFLINE_RETRY_MS = 10000; // chủ phòng chưa live: thử lại mỗi 10s
 const SIGN_BLOCKED_RETRY_MS = 60000;
 const DEDUPE_CAP = 2000;
 
@@ -56,6 +56,28 @@ class FeedService extends EventEmitter {
     this._seenQueue = [];
     this._fakeTimer = null;
     this._fakeSeq = 0;
+    // Chẩn đoán ngắt quãng (live 08/11: có đoạn comment không vào game):
+    this.disconnectCount = 0;      // tổng số lần mất kết nối TikTok
+    this.lastDisconnectAt = null;  // thời điểm ngắt gần nhất (ms epoch)
+    this._lastEventAt = 0;         // thời điểm nhận sự kiện gần nhất
+    this._silenceWarned = false;   // đã cảnh báo "im lặng" cho khoảng hiện tại chưa
+    this._watchdog = null;
+  }
+
+  // Giám sát im lặng: đã connected mà 60s không có sự kiện nào thì ghi log
+  // cảnh báo (không tự nối lại — phòng vắng thì im lặng là bình thường, nhưng
+  // log này cho buổi sau biết chính xác khoảng nào bị mất comment).
+  _startWatchdog() {
+    if (this._watchdog) return;
+    this._watchdog = setInterval(() => {
+      if (this._stopped || this.state !== 'connected' || !this._lastEventAt) return;
+      const silentMs = Date.now() - this._lastEventAt;
+      if (silentMs >= 60000 && !this._silenceWarned) {
+        this._silenceWarned = true;
+        console.log(`[feed] ⚠ Đã ${Math.round(silentMs / 1000)}s không có sự kiện mới từ TikTok (roomId ${this.roomId || '?'}) — có thể trang ký bị bóp ở nền, kiểm tra cửa sổ Chrome ký có đang hiện rõ không.`);
+      }
+    }, 15000);
+    this._watchdog.unref && this._watchdog.unref();
   }
 
   setState(state, lastError) {
@@ -89,6 +111,7 @@ class FeedService extends EventEmitter {
       this.setState('waiting_username');
       return;
     }
+    this._startWatchdog();
     this._attemptConnect();
   }
 
@@ -219,11 +242,16 @@ class FeedService extends EventEmitter {
 
     conn.on(ControlEvent.DISCONNECTED, () => {
       if (this._stopped) return;
+      this.disconnectCount += 1;
+      this.lastDisconnectAt = Date.now();
+      const silentSec = this._lastEventAt ? Math.round((Date.now() - this._lastEventAt) / 1000) : null;
+      const waitMs = this._nextBackoff();
+      console.log(`[feed] Mất kết nối TikTok (lần ngắt #${this.disconnectCount}, roomId ${this.roomId || '?'}, sự kiện cuối cách đây ${silentSec === null ? '?' : silentSec + 's'}) — nối lại sau ${waitMs / 1000}s.`);
       this.roomId = null;
-      this._scheduleRetry(this._nextBackoff(), 'reconnecting');
+      this._scheduleRetry(waitMs, 'reconnecting');
     });
     conn.on(WebcastEvent.STREAM_END, () => {
-      // Chủ phòng tắt live -> về trạng thái chờ phòng, thử lại sau 15s
+      // Chủ phòng tắt live -> về trạng thái chờ phòng, thử lại sau 10s
       if (this._stopped) return;
       this._scheduleRetry(OFFLINE_RETRY_MS, 'waiting_room');
     });
@@ -241,7 +269,8 @@ class FeedService extends EventEmitter {
       this.roomId = state && state.roomId ? String(state.roomId) : null;
       this.lastError = null;
       this.setState('connected');
-      console.log(`[feed] Đã kết nối phòng live của @${this.config.username} (roomId ${this.roomId || '?'})`);
+      const gap = this.lastDisconnectAt ? ` — nối lại sau ${Math.round((Date.now() - this.lastDisconnectAt) / 1000)}s ngắt` : '';
+      console.log(`[feed] Đã kết nối phòng live của @${this.config.username} (roomId ${this.roomId || '?'})${gap}`);
     } catch (err) {
       this._connecting = false;
       const msg = this.sanitizeError(err);
@@ -270,6 +299,8 @@ class FeedService extends EventEmitter {
   ingest(type, data) {
     const ev = normalizeEvent(type, data, Date.now());
     if (!ev) return;
+    this._lastEventAt = Date.now();
+    this._silenceWarned = false;
     if (ev.msgId) {
       if (this._seenMsgIds.has(ev.msgId)) return;
       this._seenMsgIds.add(ev.msgId);

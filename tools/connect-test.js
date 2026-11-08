@@ -5,9 +5,13 @@
 //   node tools/connect-test.js [username_khong_co_@]
 //   (hoặc lấy TIKTOK_USERNAME từ .env)
 //
+// Tuyến ký đi theo SIGN_MODE như dịch vụ chính: 'local' (MẶC ĐỊNH) dùng
+// máy ký tự host src/sign-local.mjs — không cần EULER_API_KEY;
+// 'euler' dùng EULER_API_KEY như bản cũ.
+//
 // Mã thoát:
 //   0 = kết nối được (in ra số sự kiện thấy trong vài giây)
-//   2 = thiếu cấu hình (chưa có EULER_API_KEY và/hoặc username) — in rõ thiếu gì
+//   2 = thiếu cấu hình (username, hoặc EULER_API_KEY khi SIGN_MODE=euler)
 //   3 = phòng chưa live (UserOfflineError)
 //   1 = lỗi khác (in thông báo lỗi ĐÃ LÀM SẠCH — không bao giờ in API key)
 //
@@ -16,10 +20,11 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-const CONNECT_TIMEOUT_MS = 25000;
+const CONNECT_TIMEOUT_MS = 60000;
 const OBSERVE_MS = 5000;
 
 const apiKey = (process.env.EULER_API_KEY || '').trim();
+const signMode = String(process.env.SIGN_MODE || 'local').toLowerCase() === 'euler' ? 'euler' : 'local';
 const username = (process.argv[2] || process.env.TIKTOK_USERNAME || '').trim().replace(/^@/, '');
 
 function sanitize(msg) {
@@ -30,7 +35,7 @@ function sanitize(msg) {
 
 (async () => {
   const missing = [];
-  if (!apiKey) missing.push('EULER_API_KEY (đăng ký miễn phí tại eulerstream.com rồi điền vào file .env)');
+  if (signMode === 'euler' && !apiKey) missing.push('EULER_API_KEY (SIGN_MODE=euler — đăng ký tại eulerstream.com rồi điền vào file .env; hoặc bỏ SIGN_MODE để dùng máy ký local)');
   if (!username) missing.push('TIKTOK_USERNAME (truyền qua tham số dòng lệnh hoặc điền vào file .env)');
   if (missing.length) {
     console.log('Chưa thể kết nối — đang thiếu:');
@@ -38,11 +43,20 @@ function sanitize(msg) {
     process.exit(2);
   }
 
-  const { TikTokLiveConnection, WebcastEvent } = require('tiktok-live-connector');
-  const conn = new TikTokLiveConnection(username, {
-    signApiKey: apiKey,
-    enableExtendedGiftInfo: true,
-  });
+  const ttlc = require('tiktok-live-connector');
+  const { TikTokLiveConnection, WebcastEvent } = ttlc;
+  const connOptions = { enableExtendedGiftInfo: true };
+  let signLocal = null;
+  if (signMode === 'euler') {
+    connOptions.signApiKey = apiKey;
+  } else {
+    signLocal = await import('../src/sign-local.mjs');
+    signLocal.installLocalSignRoutes(ttlc, (m) => console.log(m));
+    Object.assign(connOptions, signLocal.localConnectionOptions());
+    const p = signLocal.prepareWarmSession(username, (m) => console.log(m));
+    if (p && p.catch) p.catch(() => {});
+  }
+  const conn = new TikTokLiveConnection(username, connOptions);
 
   const counts = {};
   for (const name of ['chat', 'gift', 'like', 'follow', 'share', 'roomUser', 'member']) {
@@ -65,6 +79,7 @@ function sanitize(msg) {
     await new Promise((r) => setTimeout(r, OBSERVE_MS));
     console.log(`[connect-test] Sự kiện đã thấy: ${JSON.stringify(counts)}`);
     await conn.disconnect();
+    if (signLocal) { try { await signLocal.closeWarmSession(); } catch (_) { /* bỏ qua */ } }
     process.exit(0);
   } catch (err) {
     clearTimeout(timer);
@@ -75,6 +90,7 @@ function sanitize(msg) {
     }
     console.log(`[connect-test] Kết nối thất bại: ${msg}`);
     try { await conn.disconnect(); } catch (_) { /* bỏ qua */ }
+    if (signLocal) { try { await signLocal.closeWarmSession(); } catch (_) { /* bỏ qua */ } }
     process.exit(1);
   }
 })();

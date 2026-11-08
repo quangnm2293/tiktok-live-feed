@@ -2,7 +2,7 @@
   "name": "tiktok-live-feed",
   "version": "1.0.0",
   "private": true,
-  "description": "Nguồn cấp sự kiện TikTok LIVE độ trễ thấp cho game local (connector ký qua EulerStream, sự kiện chảy thẳng từ TikTok WebSocket)",
+  "description": "Nguồn cấp sự kiện TikTok LIVE độ trễ thấp cho game local (máy ký TỰ HOST mặc định — không phụ thuộc EulerStream; Euler chỉ còn là fallback qua SIGN_MODE=euler)",
   "type": "commonjs",
   "main": "index.js",
   "scripts": {
@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "dotenv": "^16.4.5",
+    "puppeteer-core": "^25.16.0",
     "tiktok-live-connector": "^2.5.0",
     "ws": "^8.18.0"
   }

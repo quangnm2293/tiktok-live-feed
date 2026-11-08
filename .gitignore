@@ -2,3 +2,6 @@ node_modules/
 .env
 *.log
 .DS_Store
+# Hồ sơ Chrome của máy ký local: chứa cookie/phi đăng nhập TikTok của
+# người dùng trên máy đó — DỮ LIỆU CÁ NHÂN, tuyệt đối không commit.
+src/sign-profile/

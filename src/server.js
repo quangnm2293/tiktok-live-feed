@@ -14,10 +14,12 @@ const EVENT_TYPES = ['chat', 'gift', 'like', 'follow', 'share', 'roomUser', 'mem
 
 const STATE_HINTS = {
   waiting_key:
-    'Chưa có EULER_API_KEY. Đăng ký miễn phí tại eulerstream.com, tạo API key rồi điền vào file .env (xem README).',
+    'SIGN_MODE=euler nhưng chưa có EULER_API_KEY trong file .env. Hoặc bỏ SIGN_MODE để dùng máy ký tự host (mặc định, không cần key).',
   waiting_username:
     'Chưa có TIKTOK_USERNAME trong file .env — điền username TikTok của phòng live (không có dấu @).',
   waiting_room: 'Chủ phòng chưa live. Dịch vụ sẽ tự thử kết nối lại mỗi 15 giây.',
+  sign_blocked:
+    'Máy ký local bị TikTok từ chối ở bước im/fetch. Kiểm tra cửa sổ Chrome ký: mở trang live trong cửa sổ đó và ĐĂNG NHẬP TikTok (1 lần duy nhất — phiên khách thường bị TikTok cấp thiếu dữ liệu ở phòng nhỏ). Dịch vụ tự thử lại mỗi 60 giây.',
 };
 
 class FeedServer {
@@ -98,6 +100,7 @@ class FeedServer {
       state,
       hint: STATE_HINTS[state] || null,
       username: this.config.username || null,
+      signMode: this.config.signMode || 'local',
       fakeMode: !!this.config.fake,
       roomId: this.feed.roomId || null,
       uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),

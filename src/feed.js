@@ -6,19 +6,28 @@ const { normalizeEvent } = require('./normalize');
 // FeedService: quản lý vòng đời kết nối tiktok-live-connector.
 //
 // Kiến trúc độ-trễ-thấp:
-// - Connector mở WebSocket THẲNG tới TikTok (webcast). EulerStream CHỈ ký
-//   request lúc bắt tay (qua option signApiKey) — sự kiện KHÔNG đi vòng qua
-//   máy chủ Euler nên không thêm hop nào.
+// - Connector mở WebSocket THẲNG tới TikTok (webcast). Chữ ký lúc bắt tay
+//   do MÁY KÝ TỰ HOST sinh ngay trên máy này (SIGN_MODE=local, MẶC ĐỊNH):
+//   src/sign-local.mjs thay 2 route ký của connector (RouteConfig) —
+//   tuyến chính là "phiên ấm": một Chrome thật mở trang live của phòng,
+//   luồng WebSocket của chính trang được relay nguyên bản cho connector;
+//   dự phòng là ký cổ điển (X-Bogus/X-Gnarly tự sinh trong cùng tiến
+//   trình feed — không tiến trình riêng, không dịch vụ ngoài).
+// - SIGN_MODE=euler là FALLBACK: EulerStream ký qua option signApiKey
+//   như bản cũ (lưu ý: route ký Euler nay bị khóa sau gói Business —
+//   xem README). Sự kiện không đi vòng qua máy chủ Euler ở cả hai chế độ.
 // - Mọi sự kiện thô đều qua normalizeEvent() rồi phát 'event' cho server
 //   broadcast ngay tới các game local.
 //
 // State machine (đọc qua .state):
-//   waiting_key      -> thiếu EULER_API_KEY, không thử kết nối
+//   waiting_key      -> SIGN_MODE=euler mà thiếu EULER_API_KEY
 //   waiting_username -> thiếu TIKTOK_USERNAME
 //   connecting       -> đang connect()
 //   connected        -> đang nhận sự kiện
 //   reconnecting     -> rớt kết nối, đang backoff để nối lại
 //   waiting_room     -> chủ phòng chưa live (UserOfflineError), thử lại 15s
+//   sign_blocked     -> máy ký local bị TikTok từ chối ở im/fetch
+//                       (LocalSignBlocked), thử lại thưa (60s)
 //   error            -> lỗi khác, vẫn tiếp tục backoff (không crash)
 //   stopped          -> đã dừng chủ động (shutdown)
 //
@@ -26,12 +35,15 @@ const { normalizeEvent } = require('./normalize');
 
 const BACKOFF_STEPS = [1000, 2000, 5000, 10000, 30000];
 const OFFLINE_RETRY_MS = 15000;
+const SIGN_BLOCKED_RETRY_MS = 60000;
 const DEDUPE_CAP = 2000;
 
 class FeedService extends EventEmitter {
   constructor(config) {
     super();
-    this.config = config; // { eulerApiKey, username, fake, debug }
+    this.config = config; // { eulerApiKey, username, fake, debug, signMode }
+    this._signLocal = null;        // module src/sign-local.mjs (nạp lười, chỉ chế độ local)
+    this._signInstalled = false;   // đã cắm route ký local vào RouteConfig chưa
     this.state = 'idle';
     this.roomId = null;
     this.lastError = null;
@@ -67,7 +79,9 @@ class FeedService extends EventEmitter {
       this._startFake();
       return;
     }
-    if (!this.config.eulerApiKey) {
+    // Chế độ local (mặc định) KHÔNG cần key Euler — máy ký tự host lo.
+    // Chỉ fallback euler mới đòi EULER_API_KEY.
+    if (this.config.signMode === 'euler' && !this.config.eulerApiKey) {
       this.setState('waiting_key');
       return;
     }
@@ -86,7 +100,36 @@ class FeedService extends EventEmitter {
       try { await this.connection.disconnect(); } catch (_) { /* bỏ qua */ }
       this.connection = null;
     }
+    if (this._signLocal && this._signLocal.closeWarmSession) {
+      try { await this._signLocal.closeWarmSession(); } catch (_) { /* bỏ qua */ }
+    }
     this.setState('stopped');
+  }
+
+  // Nạp máy ký tự host (ESM) vào tiến trình CommonJS này + cắm route ký
+  // vào RouteConfig của connector (một lần duy nhất — registry là toàn
+  // cục của thư viện) + dựng PHIÊN ẤM trước (không chờ: route ký tự chờ
+  // phiên ấm khi connector thật sự cần). Chỉ chạy ở SIGN_MODE=local.
+  async _ensureLocalSign(ttlc) {
+    if (!this._signLocal) {
+      this._signLocal = await import('./sign-local.mjs');
+    }
+    const log = (m) => console.log(m);
+    if (!this._signInstalled) {
+      this._signLocal.installLocalSignRoutes(ttlc, log);
+      this._signInstalled = true;
+    }
+    try {
+      const p = this._signLocal.prepareWarmSession(this.config.username, log);
+      if (p && typeof p.catch === 'function') p.catch(() => { /* lỗi đã được ghi log trong module ký */ });
+    } catch (_) { /* phiên ấm lỗi không được làm sập đường connect */ }
+    return this._signLocal;
+  }
+
+  _isLocalSignBlocked(err) {
+    if (!err) return false;
+    if (err.name === 'LocalSignBlocked') return true;
+    return /LocalSignBlocked/.test(String(err.message || err));
   }
 
   _scheduleRetry(ms, state) {
@@ -117,9 +160,10 @@ class FeedService extends EventEmitter {
     this._connecting = true;
     this.setState(this._backoffIdx > 0 ? 'reconnecting' : 'connecting');
 
-    let TikTokLiveConnection, ControlEvent, WebcastEvent;
+    let ttlc, TikTokLiveConnection, ControlEvent, WebcastEvent;
     try {
-      ({ TikTokLiveConnection, ControlEvent, WebcastEvent } = require('tiktok-live-connector'));
+      ttlc = require('tiktok-live-connector');
+      ({ TikTokLiveConnection, ControlEvent, WebcastEvent } = ttlc);
     } catch (err) {
       this._connecting = false;
       this.setState('error', this.sanitizeError(err));
@@ -133,10 +177,29 @@ class FeedService extends EventEmitter {
       this.connection = null;
     }
 
-    const conn = new TikTokLiveConnection(this.config.username, {
-      signApiKey: this.config.eulerApiKey, // Euler CHỈ ký; WS nối thẳng TikTok
-      enableExtendedGiftInfo: true,        // để sự kiện gift có tên + giá diamond
-    });
+    const connOptions = {
+      enableExtendedGiftInfo: true, // để sự kiện gift có tên + giá diamond
+    };
+    if (this.config.signMode === 'euler') {
+      connOptions.signApiKey = this.config.eulerApiKey; // Euler ký; WS nối thẳng TikTok
+    } else {
+      // SIGN_MODE=local (mặc định): cắm máy ký tự host TRƯỚC khi tạo
+      // connection. Không truyền signApiKey — connector không được chạm
+      // tới Euler nữa (room-id cũng đã tắt tuyến Euler trong module ký).
+      try {
+        const sl = await this._ensureLocalSign(ttlc);
+        Object.assign(connOptions, sl.localConnectionOptions());
+      } catch (err) {
+        this._connecting = false;
+        console.error('[feed] Không bật được máy ký local:', this.sanitizeError(err));
+        this.setState('error', 'Máy ký local không nạp được: ' + this.sanitizeError(err));
+        this._scheduleRetry(30000, 'error');
+        return;
+      }
+      if (this._stopped) { this._connecting = false; return; }
+    }
+
+    const conn = new TikTokLiveConnection(this.config.username, connOptions);
     this.connection = conn;
 
     const forward = (type) => (data) => this.ingest(type, data);
@@ -183,6 +246,14 @@ class FeedService extends EventEmitter {
         this.setState('waiting_room', null);
         console.log(`[feed] @${this.config.username} chưa live — thử lại sau ${OFFLINE_RETRY_MS / 1000}s`);
         this._scheduleRetry(OFFLINE_RETRY_MS, 'waiting_room');
+      } else if (this.config.signMode !== 'euler' && this._isLocalSignBlocked(err)) {
+        // Máy ký local bị TikTok từ chối ở im/fetch: thử lại THƯA (60s)
+        // — thử dồn cũng ra cùng kết quả, mà mỗi lần thử đều dựng lại
+        // phiên ấm. Nếu vừa đăng nhập TikTok trong cửa sổ Chrome ký
+        // thì lần thử sau có thể qua.
+        this.setState('sign_blocked', msg);
+        console.error('[feed] Máy ký local bị chặn ở im/fetch — thử lại sau 60s. Chi tiết:', msg);
+        this._scheduleRetry(SIGN_BLOCKED_RETRY_MS, 'sign_blocked');
       } else {
         console.error('[feed] Kết nối thất bại:', msg);
         this._scheduleRetry(this._nextBackoff(), 'error');

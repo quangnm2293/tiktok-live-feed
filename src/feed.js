@@ -162,7 +162,11 @@ class FeedService extends EventEmitter {
 
     let ttlc, TikTokLiveConnection, ControlEvent, WebcastEvent;
     try {
-      ttlc = require('tiktok-live-connector');
+      // Nạp bằng import() động: bản 2.5.0 của connector là ES Module —
+      // require() chỉ nuốt được ESM từ Node 22.12+/20.19+; Node cũ hơn
+      // (vd Mac của chủ phòng) ném ERR_REQUIRE_ESM ngay bước này, feed
+      // chết trước khi kịp ký/mở Chrome. import() chạy mọi bản Node.
+      ttlc = await import('tiktok-live-connector');
       ({ TikTokLiveConnection, ControlEvent, WebcastEvent } = ttlc);
     } catch (err) {
       this._connecting = false;

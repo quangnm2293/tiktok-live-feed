@@ -43,7 +43,7 @@ function sanitize(msg) {
     process.exit(2);
   }
 
-  const ttlc = require('tiktok-live-connector');
+  const ttlc = await import('tiktok-live-connector');
   const { TikTokLiveConnection, WebcastEvent } = ttlc;
   const connOptions = { enableExtendedGiftInfo: true };
   let signLocal = null;
